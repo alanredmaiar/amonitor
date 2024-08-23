@@ -1,178 +1,17 @@
 import asyncio
-import psutil
 import os
-from abc import ABC, abstractmethod
 from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
-from typing import Literal, Any
+from typing import Literal
 from datetime import datetime
 
 from aiodocker import Docker
 from aiodocker.containers import DockerContainer
 from aiodocker.exceptions import DockerError, DockerContainerError
-import docker
 import pandas as pd
 
-from opslib.objtools import to_timestamp, safe_path
-
-
-
-class BaseResourcesMonitor(ABC):
-    def __init__(self, samples=10, interval=0.1):
-        self.samples = samples
-        self.interval = interval
-        self.cpu_samples = []
-        self.memory_samples = []
-        self.disk_usage_samples = []
-        self.temperature_samples = []
-        self.latency = 0.0
-        self._summary = None
-        self.start_time = None
-
-    @abstractmethod
-    async def collect_data(self):
-        pass
-
-    @abstractmethod
-    def _read_temperature(self):
-        pass
-
-    async def summarize(self) -> dict:
-        if self._summary:
-            return self._summary
-        self._summary = {
-            'cpu': {
-                'num_cores': psutil.cpu_count(logical=False),
-                'min': min(self.cpu_samples),
-                'max': max(self.cpu_samples),
-                'avg': sum(self.cpu_samples) / len(self.cpu_samples)
-            },
-            'memory': {
-                'min': min(self.memory_samples),
-                'max': max(self.memory_samples),
-                'avg': sum(self.memory_samples) / len(self.memory_samples)
-            },
-            'disk_usage': {
-                'avg': sum(self.disk_usage_samples) / len(self.disk_usage_samples)
-            },
-            'temperature': {
-                'avg': sum(temp for temp in self.temperature_samples if temp is not None) / len([temp for temp in self.temperature_samples if temp is not None]) if self.temperature_samples else None
-            },
-            'latency': self.latency
-        }
-        return self._summary
-
-    @property
-    def summary(self):
-        return self._summary
-
-    @asynccontextmanager
-    async def monitor_resources(self):
-        """Context manager to start and stop resource monitoring."""
-        await self.collect_data()
-        yield self
-        self.latency = asyncio.get_event_loop().time() - self.start_time
-        await self.summarize()
-
-
-
-class ResourcesMonitor:
-    def __init__(self, samples=10, interval=0.1):
-        self.samples = samples
-        self.interval = interval
-        self.cpu_samples = []
-        self.memory_samples = []
-        self.disk_usage_samples = []
-        self.temperature_samples = []
-        self.latency = 0.0
-        self._summary = None
-        self.start_time = None
-
-    async def collect_data(self):
-        """Collects CPU, memory, disk usage, and optionally temperature data over the specified interval."""
-        self.process = psutil.Process()
-        self.start_time = asyncio.get_event_loop().time()
-        for _ in range(self.samples):
-            self.cpu_samples.append(self.process.cpu_percent(interval=None))
-            self.memory_samples.append(self.process.memory_info().rss / (1024 ** 2))
-            self.disk_usage_samples.append(psutil.disk_usage('/').used / (1024 ** 2))
-            self.temperature_samples.append(self._read_temperature())
-            await asyncio.sleep(self.interval)
-        self.latency = asyncio.get_event_loop().time() - self.start_time
-
-    def _read_temperature(self):
-        """Reads the CPU temperature from the system. Assumes a Linux system for demonstration."""
-        try:
-            with open("/sys/class/thermal/thermal_zone0/temp", "r") as file:
-                temp = int(file.read()) / 1000.0
-            return temp
-        except FileNotFoundError:
-            return None
-
-    async def summarize(self) -> dict:
-        """Summarizes and returns the collected data."""
-        if self._summary:
-            return self._summary
-        self._summary = {
-            'cpu': {
-                'num_cores': psutil.cpu_count(logical=False),
-                'min': min(self.cpu_samples),
-                'max': max(self.cpu_samples),
-                'avg': sum(self.cpu_samples) / len(self.cpu_samples)
-            },
-            'memory': {
-                'min': min(self.memory_samples),
-                'max': max(self.memory_samples),
-                'avg': sum(self.memory_samples) / len(self.memory_samples)
-            },
-            'disk_usage': {
-                'avg': sum(self.disk_usage_samples) / len(self.disk_usage_samples)
-            },
-            'temperature': {
-                'avg': sum(temp for temp in self.temperature_samples if temp is not None) / len([temp for temp in self.temperature_samples if temp is not None]) if self.temperature_samples else None
-            },
-            'latency': self.latency
-        }
-        return self._summary
-
-    @asynccontextmanager
-    async def monitor_resources(self):
-        """Context manager to start and stop resource monitoring."""
-        await self.collect_data()
-        yield self
-        self.latency = asyncio.get_event_loop().time() - self.start_time
-        await self.summarize()
-
-    @property
-    def summary(self):
-        return self._summary
-    
-
-def get_containers(filter_name: str | None = None, filter_port: int | None = None) -> list[dict]:
-    """Returns a list of existing Docker containers with optional filtering by name or port."""
-    try:
-        host = os.getenv("DOCKER_HOST")
-        client = docker.DockerClient(base_url=host) if host else docker.from_env()
-        containers = client.containers.list()
-        if filter_name:
-            containers = [c for c in containers if filter_name.lower() in c.name.lower()]
-
-        if filter_port:
-            containers = [
-                c for c in containers
-                if any(
-                    filter_port == int(port_key.split('/')[0]) or
-                    any(filter_port == int(port_info['HostPort']) for port_info in port_list)
-                    for port_key, port_list in c.ports.items()
-                    if port_list is not None
-                )
-            ]
-
-        return [c for c in containers]
-    except Exception as ex:
-        logging.error("Failed to retrieve containers: %s", ex)
-        return []
+from .utils import to_timestamp, safe_path
 
 
 
@@ -180,16 +19,13 @@ async def aget_containers(filter_name: str | None = None, filter_port: int | Non
     """Returns a list of existing containers with optional filtering by name or port."""
     try:
         host = os.getenv("DOCKER_HOST")
-        async with Docker(url=host) as client:
-            containers = await client.containers.list()
-            
-            if filter_name:
-                containers = [c for c in containers if filter_name.lower() in c['Names'][0].lower()]
-            
-            if filter_port:
-                containers = [c for c in containers if any(filter_port == port.get('PublicPort') or filter_port == port.get('PrivatePort') for port in c['Ports'])]
-            
-            return containers
+        client = Docker(host) if host else Docker()
+        containers = await client.containers.list()
+        if filter_name:
+            containers = [c for c in containers if filter_name.lower() in c['Names'][0].lower()]
+        if filter_port:
+            containers = [c for c in containers if any(filter_port == port.get('PublicPort') or filter_port == port.get('PrivatePort') for port in c['Ports'])]
+        return containers
     except Exception as e:
         print(f"Failed to retrieve containers: {e}")
         return []
@@ -204,7 +40,7 @@ class DockerMonitor:
         self._num_cores: int = 1
         self.raw_stats: list[dict[str, float]] = []
         self.transformed_stats: list[dict[str, float]] = []
-        self.aggregated_stats: dict[str, list[float]] = {}
+        self._aggregated_stats: dict[str, list[float]] = {}
         self._summary: dict[str, dict[str, float] | float | int] = {}
         self._logs: list[str] = []
         self.container_name = container_name
@@ -216,6 +52,10 @@ class DockerMonitor:
     @property
     def logs(self):
         return self._logs
+    
+    @property
+    def aggregated_stats(self):
+        return self._aggregated_stats
 
     async def list_containers(self):
         """List all running containers."""
@@ -351,15 +191,15 @@ class DockerMonitor:
 
     async def aggregate_stats(self) -> dict:
         """Aggregates transformed stats into a single dictionary."""
-        aggregated_stats = {}
+        aggregated_stats: dict[str, list[float]] = {}
         if self.transformed_stats:
-            all_keys = set()
+            all_keys: set = set()
             for stat in self.transformed_stats:
                 all_keys.update(stat.keys())
             for key in all_keys:
-                values = [stat.get(key) for stat in self.transformed_stats]
-                aggregated_stats[key] = values
-        self.aggregated_stats = aggregated_stats
+                if values := [stat.get(key) for stat in self.transformed_stats]:
+                    aggregated_stats[key] = values  # type: ignore
+        self._aggregated_stats = aggregated_stats
         return aggregated_stats
 
     async def collect_data(self, container_name: str | None = None):
@@ -405,7 +245,7 @@ class DockerMonitor:
                 await self.task
             except asyncio.CancelledError:
                 logging.info("Data collection task was cancelled.")
-            self.aggregated_stats = await self.aggregate_stats()
+            self._aggregated_stats = await self.aggregate_stats()
             self._summary = await self.summarize()
             await self.client.close()
 
@@ -416,7 +256,7 @@ class DockerMonitor:
         **kwargs
     ) -> pd.DataFrame | dict:
         """Calculates the summary statistics from collected data."""
-        summary, agg = {}, self.aggregated_stats.copy() or await self.aggregate_stats()
+        summary, agg = {}, self._aggregated_stats.copy() or await self.aggregate_stats()
         if agg and ts_range:
             agg = self.filter_by_timestamp(agg, ts_range)
         if agg:
@@ -436,7 +276,7 @@ class DockerMonitor:
 
     async def export(self, ts_range: tuple[int | float, int | float] | None = None, fmt: Literal["dataframe", "dict"] = "dataframe", **kwargs) -> pd.DataFrame | list[dict]:
         """Exports the collected stats to a DataFrame."""
-        agg = self.aggregated_stats.copy()
+        agg = self._aggregated_stats.copy()
         agg.update(kwargs)
         filtered_data = self.filter_by_timestamp(agg, ts_range) if ts_range else agg
         df = pd.DataFrame(filtered_data)

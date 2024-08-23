@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "amonitor"
+version = "0.1.0"
+description = "An asynchronous test of utils for Service monitoring and data-collection daemon"
+authors = ["alanredmaiar <tatanrhf@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+aiodocker = "^0.22.2"
+pytest = "^8.3.2"
+pytest-asyncio = "^0.24.0"
+pandas = "^2.2.2"
+pytest-mock = "^3.14.0"
+pandas-stubs = "^2.2.2.240807"
+ruff = "^0.6.2"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
